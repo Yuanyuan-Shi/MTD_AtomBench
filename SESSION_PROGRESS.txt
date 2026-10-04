@@ -31,7 +31,7 @@ Scale on AWS: batch 64 observations (32 pairs), Stage A 10 epochs over valid pai
 Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPanda/<task dirs>,
   data/frame_cache/, openpi/.venv, openpi/third_party.
 
-3. CORE DESIGN (invariants — keep them when changing code)
+3. CORE DESIGN RULES
   - Config = experiment + "hardware". hardware (launcher, nodes, gpus_per_node, output_root,
     frame_cache_dir, workers, max_train_obs_per_gpu, resume_interval, step_seconds, benchmark_file)
     is excluded from config_hash / matches_run_config: moving hardware never invalidates runs.
