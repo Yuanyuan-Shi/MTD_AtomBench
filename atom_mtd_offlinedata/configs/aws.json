@@ -1,0 +1,103 @@
+{
+  "project": "atom-mtd-offlinedata",
+  "wandb_base_url": "https://forge.coreweave.com/api/wandb",
+  "wandb_entity": null,
+  "dataset_repo": "AtomBench/FrankaPanda",
+  "dataset_revision": "4c2d4ed5e86b7967cc048a3bfe935d5daef6c663",
+  "dataset_root": "atom_mtd_offlinedata/data/FrankaPanda",
+  "tasks": {
+    "i1": "I1_Pick_the_blue_cube_and_place_it_on_the_basket",
+    "i5": "I5_Pick_two_blocks_and_place_them_in_the_basket"
+  },
+  "composition_task": "x1",
+  "x1_dataset_root": null,
+  "x1_status": "No x1 observation/action trajectories in pinned public FrankaPanda release",
+  "base_checkpoint_source": "gs://openpi-assets/checkpoints/pi05_base/params",
+  "base_checkpoint_jax": "/mnt1/ECOT-Alignment/pi05_policy_training/data/pi05_base",
+  "base_checkpoint": "atom_mtd_offlinedata/checkpoints/pi05_base_pytorch",
+  "base_checkpoint_hf_repo": "yyshi0619/pi05-base-pytorch",
+  "base_checkpoint_hf_revision": "3e7adadea2068316728d07e22a2bb84361debb1c",
+  "base_checkpoint_sha256": "f722b8d13a9c70ee2fe7451568fce1ded46d28d30f0fb7b89b801237514d85b1",
+  "data_seed": 20261001,
+  "train_episodes_per_task": 80,
+  "validation_episodes_per_task": 10,
+  "test_episodes_per_task": 10,
+  "training_seeds": [
+    7
+  ],
+  "batch_size": 64,
+  "action_horizon": 50,
+  "execution_horizon": 1,
+  "action_dim": 32,
+  "physical_action_dim": 14,
+  "angle_dims": [11, 12, 13],
+  "max_token_len": 200,
+  "stage_a": {
+    "epochs": 10,
+    "peak_lr": 5e-05,
+    "end_lr": 5e-06,
+    "warmup_fraction": 0.05
+  },
+  "stage_b": {
+    "steps": 5000,
+    "peak_lr": 1e-05,
+    "end_lr": 1e-06,
+    "warmup_fraction": 0.05
+  },
+  "smoke_steps": 30,
+  "validation_interval": 100,
+  "validation_batches": 4,
+  "evaluation_pairs_per_task": 256,
+  "denoise_steps": 10,
+  "lambda_out": 0.5,
+  "lambda_repr": 0.1,
+  "lambda_temp": 0.1,
+  "repr_eps": 1e-08,
+  "optimizer": {
+    "name": "AdamW",
+    "b1": 0.9,
+    "b2": 0.95,
+    "eps": 1e-08,
+    "weight_decay": 1e-10,
+    "clip_gradient_norm": 1.0
+  },
+  "lora": {
+    "paligemma_rank": 16,
+    "paligemma_alpha": 16,
+    "action_expert_rank": 32,
+    "action_expert_alpha": 32,
+    "dropout": 0.0,
+    "targets": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ],
+    "initialization": "both factors normal std=0.01, matching OpenPI",
+    "attention_factorization": "per head, matching OpenPI einsum axes",
+    "train_non_llm": true
+  },
+  "hardware": {
+    "launcher": "slurm",
+    "nodes": 3,
+    "gpus_per_node": 8,
+    "output_root": "atom_mtd_offlinedata/runs/aws",
+    "frame_cache_dir": "/opt/dlami/nvme/atom_frame_cache",
+    "cache_build_workers": 48,
+    "max_train_obs_per_gpu": 16,
+    "loader_workers": 6,
+    "eval_batch_pairs": 16,
+    "resume_interval": 1000,
+    "internode_efficiency": 0.85,
+    "step_seconds": {
+      "reference_gpus": 8,
+      "stage_a": 1.5,
+      "stage_b": 2.0,
+      "eval_model": 300
+    },
+    "benchmark_file": "atom_mtd_offlinedata/reports/benchmark_aws.json"
+  }
+}

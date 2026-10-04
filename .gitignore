@@ -1,0 +1,24 @@
+# Python environments and tool caches (setup.sh recreates the environment)
+openpi/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.cache/
+wandb/
+
+# Base model: prepare.py downloads it from Hugging Face
+atom_mtd_offlinedata/checkpoints/
+# Training and evaluation outputs
+atom_mtd_offlinedata/runs/
+# Logs and status files written by the tools
+atom_mtd_offlinedata/reports/
+# Patched transformers copy: setup.sh builds it
+atom_mtd_offlinedata/runtime/
+# Frame cache: cache_frames.py builds it
+atom_mtd_offlinedata/data/frame_cache/
+# Dataset: prepare.py downloads it (splits.json and norm_stats.json stay in git)
+atom_mtd_offlinedata/data/FrankaPanda/*/
+atom_mtd_offlinedata/data/FrankaPanda/*.bak_*
+# ALOHA / LIBERO assets: setup.sh clones them
+openpi/third_party/

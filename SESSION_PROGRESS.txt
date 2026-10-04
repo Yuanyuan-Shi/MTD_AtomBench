@@ -1,0 +1,90 @@
+ATOM MTD OFFLINE — RESTART HANDOFF
+Saved UTC: 2026-10-03T04:26:13.703236+00:00
+Workspace: /mnt1/Multi-Teacher Distillation
+
+CURRENT STATE
+COMPLETE: all 6 models trained for 30 updates each, seed 7 (180 total).
+COMPLETE: offline evaluation of Joint BC and all 3 MTD variants, 4 held-out pairs per atomic task per model.
+smoke_passed.json: passed=true. All 6 train/validation decrease gates passed; W&B training metrics verified.
+15 tests passed. All six saved checkpoint SHA256s rechecked on disk for this handoff.
+All Stage-B initialization hashes equal the Joint BC checkpoint hash.
+No training/evaluation/report-watcher processes were active when checked for this handoff.
+No unfinished optimizer state needs recovery; no run needs restarting.
+
+LATEST USER SCOPE / CONSTRAINTS
+Only the smoke test on this workstation. User plans GitHub push and a different AWS account for full experiments.
+One model per variant, one matched seed. Original request for three seeds was explicitly superseded.
+Do not launch full/main experiments automatically, publish to GitHub, or provision AWS without a new request.
+Offline only: no ManiSkill, closed-loop evaluation, or success-rate claims.
+x1 never enters training. Public pinned data has no valid x1 observation/action trajectories; x1 evaluation is unavailable.
+These tiny smoke results verify implementation, not a reliable ranking of MTD methods. No across-seed standard deviation.
+
+FIXED TASK/FLOW LOSS PROBES (exclude KD terms)
+Model | train initial -> final | validation initial -> final
+teacher_i1 | 0.049707929 -> 0.027631166 | 0.050686233 -> 0.032922429
+teacher_i5 | 0.048349885 -> 0.032807950 | 0.048291243 -> 0.036352253
+joint_bc | 0.055017021 -> 0.037432830 | 0.048925067 -> 0.033982965
+output_mtd | 0.037432830 -> 0.036698965 | 0.033982965 -> 0.033303658
+output_repr_mtd | 0.037432830 -> 0.036687084 | 0.033982965 -> 0.033317556
+output_repr_temp_mtd | 0.037432830 -> 0.036675266 | 0.033982965 -> 0.033303723
+
+Specialists probe their own task; Joint BC/MTD use the same pooled i1+i5 probes.
+
+W&B LINKS
+teacher_i1: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/ifrepl17
+teacher_i5: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/i852gmf2
+joint_bc: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/iojref1f
+output_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/tntedwpx
+output_repr_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/vyfewl0i
+output_repr_temp_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/i7l3cjnm
+
+FILES TO READ AFTER RESTART
+1. SESSION_PROGRESS.txt (this file; root-level handoff for next session).
+2. atom_mtd_offlinedata/reports/session_progress.json (exact results, hashes, first-batch losses, evaluation).
+3. atom_mtd_offlinedata/reports/smoke_status.md and training_loss_curves.png / fixed_probe_curves.png.
+4. atom_mtd_offlinedata/README.md (implementation/protocol/reproduction).
+5. atom_mtd_offlinedata/runs/smoke/<variant>_seed7/: config.json, result.json, metrics.jsonl, first_batch.json, wandb.json, checkpoint/.
+6. evaluation.json exists for Joint BC and the three MTD variants; representation_audit.json exists for all MTD runs.
+
+LOCAL ENVIRONMENT / PROVENANCE
+Copied OpenPI: openpi/, source commit 215abfb217dbac7d5f1273282331b9b1866c0479; original checkout untouched.
+LoRA SFT implementation: pi05_lora_sft/. Training reuses copied OpenPI train_loop via callbacks.
+Base source: gs://openpi-assets/checkpoints/pi05_base/params
+Converted base: atom_mtd_offlinedata/checkpoints/pi05_base_pytorch/model.safetensors
+Base SHA256: f722b8d13a9c70ee2fe7451568fce1ded46d28d30f0fb7b89b801237514d85b1
+LoRA PaliGemma rank/alpha=16/16; action expert=32/32; dropout=0. Per-head OpenPI factors.
+q/k/v/o and gate/up/down projections; non-LLM modules also trainable per original OpenPI freeze filter.
+Local venv: openpi/.venv. Torch 2.7.1+cu128, torchvision 0.22.1+cu128 for Blackwell GPU.
+Required local Transformers overlay: atom_mtd_offlinedata/runtime/python/transformers.
+W&B API: https://forge.coreweave.com/api/wandb; UI uses /wandb/. Project atom-mtd-offlinedata.
+Existing authentication is read from local netrc into process environment by tracking.py; no API keys stored in handoff.
+Dataset: AtomBench/FrankaPanda revision 4c2d4ed5e86b7967cc048a3bfe935d5daef6c663.
+Exact episode split manifest: atom_mtd_offlinedata/data/FrankaPanda/splits.json. 80/10/10 episodes per i1/i5.
+Default config: configs/single_seed.json (seed list [7]).
+Actual smoke launch used configs/experiment.json (legacy planned list [7,17,27], but smoke executed ONLY seed 7).
+These configs differ only in planned seed repetitions. matches_run_config permits that difference and verifies all actual per-run settings.
+First teacher was already running when probe logging was enhanced: initial/final fixed probes only. Later models also probe at updates 10,20,30.
+No Git repository at workspace root yet; copied openpi contains its own .git. No commit/push performed.
+
+AFTER REBOOT — READ RESULTS WITHOUT RESTARTING TRAINING
+cd '/mnt1/Multi-Teacher Distillation'
+source atom_mtd_offlinedata/env.sh
+cat SESSION_PROGRESS.txt
+"$ATOM_PYTHON" -m atom_mtd_offlinedata.smoke_report
+# Optional correctness recheck:
+"$ATOM_PYTHON" -m pytest -q atom_mtd_offlinedata/tests
+# Optional one-model re-evaluation only (not needed for saved results):
+"$ATOM_PYTHON" -m atom_mtd_offlinedata.evaluate --variant output_repr_temp_mtd --seed 7 --smoke
+Do not rerun run_experiment merely to inspect progress: it skips completed training but repeats evaluations.
+
+FUTURE WORK (after user asks)
+Prepare a clean GitHub source repository and portable AWS environment/data/checkpoint setup.
+Full experiments use single_seed.json: 3 Stage-A jobs x 3000 updates + 3 Stage-B jobs x 1000 = 12000 updates.
+Do not present those main experiments as completed. No three-seed results are available or required.
+
+PERSISTENCE
+Six checkpoint files remain at their original locations (~993 MiB each); converted base and datasets also remain on disk.
+runs/, checkpoints/, data/, runtime/ are gitignored. A future GitHub push alone will NOT transfer checkpoints or datasets.
+A compact source/results archive is in atom_mtd_offlinedata/reports/session_restart_bundle.tar.gz.
+The archive deliberately excludes weights, datasets, virtualenv, runtime overlay, .git, and authentication files.
+This is a local restart save, not a remote backup or preservation of unsaved chat UI state.
