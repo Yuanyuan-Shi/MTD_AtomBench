@@ -1,90 +1,117 @@
-ATOM MTD OFFLINE — RESTART HANDOFF
-Saved UTC: 2026-10-03T04:26:13.703236+00:00
-Workspace: /mnt1/Multi-Teacher Distillation
+ATOM MTD — HANDOFF FOR THE AWS TEST RUNS
+Updated: 2026-10-04 · Repo: https://github.com/Yuanyuan-Shi/MTD_AtomBench (commit 744ffdb and later)
+Detailed protocol: atom_mtd_offlinedata/README.md. This file: what an agent needs to run and debug AWS.
 
-CURRENT STATE
-COMPLETE: all 6 models trained for 30 updates each, seed 7 (180 total).
-COMPLETE: offline evaluation of Joint BC and all 3 MTD variants, 4 held-out pairs per atomic task per model.
-smoke_passed.json: passed=true. All 6 train/validation decrease gates passed; W&B training metrics verified.
-15 tests passed. All six saved checkpoint SHA256s rechecked on disk for this handoff.
-All Stage-B initialization hashes equal the Joint BC checkpoint hash.
-No training/evaluation/report-watcher processes were active when checked for this handoff.
-No unfinished optimizer state needs recovery; no run needs restarting.
+1. WHAT THE PROJECT DOES
+Offline multi-teacher distillation (MTD) for the pi0.5 VLA (OpenPI, PyTorch) on ATOM-Bench FrankaPanda
+(HF dataset AtomBench/FrankaPanda @ 4c2d4ed5…). No simulator, no rollouts, no success rates.
+  Stage A (from pi0.5 base + LoRA): teacher_i1 (task i1 only), teacher_i5 (task i5 only), joint_bc (both).
+  Stage B (from joint_bc; frozen teachers routed per sample by task): output_mtd, output_repr_mtd,
+    output_repr_temp_mtd (each adds one KD term: flow output, normalized hidden states, temporal residual).
+  Evaluation: held-out test pairs; all 6 models (teachers on their own task only, no KD metrics).
+  x1 (composition task) has no released trajectories: reported "unavailable", never trained on.
+Scale on AWS: batch 64 observations (32 pairs), Stage A 10 epochs over valid pairs
+  (T1 11,309 / T2 17,430 / Joint BC 28,739 updates), Stage B 5,000 updates each, one seed (7).
 
-LATEST USER SCOPE / CONSTRAINTS
-Only the smoke test on this workstation. User plans GitHub push and a different AWS account for full experiments.
-One model per variant, one matched seed. Original request for three seeds was explicitly superseded.
-Do not launch full/main experiments automatically, publish to GitHub, or provision AWS without a new request.
-Offline only: no ManiSkill, closed-loop evaluation, or success-rate claims.
-x1 never enters training. Public pinned data has no valid x1 observation/action trajectories; x1 evaluation is unavailable.
-These tiny smoke results verify implementation, not a reliable ranking of MTD methods. No across-seed standard deviation.
+2. LAYOUT (repo root = /mnt1/Multi-Teacher Distillation locally)
+  setup.sh                  one-time setup of a clone: openpi/third_party (pinned), openpi/.venv
+                            (uv.lock + torch 2.7.1+cu128), atom_mtd_offlinedata/runtime (patched transformers)
+  openpi/                   vendored OpenPI @ 215abfb (+ edits: scripts/train_pytorch.py hooks,
+                            models_pytorch/pi0_pytorch.py forward_features)
+  pi05_lora_sft/lora.py     per-head LoRA matching OpenPI's JAX LoRA
+  atom_mtd_offlinedata/     the experiment (env.sh sets PYTHONPATH; always `source` it)
+    configs/{local,aws}.json  ONLY two configs; identical except batch_size and the "hardware" block
+    prepare.py   base model (HF yyshi0619/pi05-base-pytorch @3e7adade, sha256 f722b8d1…) + dataset,
+                 splits, angle windows, norm stats      data.py      pairs, transforms, PairLoader
+    model.py / losses.py      DistillationPolicy (compare = matched student/teacher forward), KD losses
+    train.py     hooks into openpi train_loop (no own optimizer loop); DDP-aware; resume; benchmark mode
+    evaluate.py  test metrics, sharded over ranks     run_experiment.py  plan -> launch phases -> checks
+    plan.py      GPU allocation search     launch/   local + SLURM launchers, slurm_experiment.sbatch
+    cache_frames.py  frame cache     benchmark.py  s/step measurement     preflight.py  environment gate
+Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPanda/<task dirs>,
+  data/frame_cache/, openpi/.venv, openpi/third_party.
 
-FIXED TASK/FLOW LOSS PROBES (exclude KD terms)
-Model | train initial -> final | validation initial -> final
-teacher_i1 | 0.049707929 -> 0.027631166 | 0.050686233 -> 0.032922429
-teacher_i5 | 0.048349885 -> 0.032807950 | 0.048291243 -> 0.036352253
-joint_bc | 0.055017021 -> 0.037432830 | 0.048925067 -> 0.033982965
-output_mtd | 0.037432830 -> 0.036698965 | 0.033982965 -> 0.033303658
-output_repr_mtd | 0.037432830 -> 0.036687084 | 0.033982965 -> 0.033317556
-output_repr_temp_mtd | 0.037432830 -> 0.036675266 | 0.033982965 -> 0.033303723
+3. CORE DESIGN (invariants — keep them when changing code)
+  - Config = experiment + "hardware". hardware (launcher, nodes, gpus_per_node, output_root,
+    frame_cache_dir, workers, max_train_obs_per_gpu, resume_interval, step_seconds, benchmark_file)
+    is excluded from config_hash / matches_run_config: moving hardware never invalidates runs.
+    Changing any experiment key does (finished runs then raise "stale"). tests/test_scaleup.py
+    enforces local.json vs aws.json differ only in hardware + batch_size.
+  - No experiment values as literals or default args in code; descriptive names (user preference).
+  - Seeds: training_seeds (per replicate: LoRA init, batches, per-step tau/noise via
+    seed*STEP_SEED_STRIDE+step) and data_seed (global: per-task split default_rng([data_seed, task]),
+    eval = data_seed+1, probes +2, audit +3). splits.json records data_seed + split scheme; data.py
+    refuses a mismatching splits.json.
+  - Pairs: (t, t + execution_horizon) consecutive policy queries (config, default 1); both 50-step
+    chunks fully inside the episode; batch rows interleaved [p0_t, p0_t+k, p1_t, …] — the temporal
+    loss reshapes (-1, 2, …) on this order.
+  - GPU-count invariance: global batch / tau / noise drawn from (seed, step) and sliced per rank;
+    augmentation drawn per rank. Logged losses are all-reduced means. Rank 0 owns all files/W&B.
+  - compare(): augment once, same tau/noise/observation for student and teacher (asserted).
+  - Language KD mask = instruction + discretized-state tokens (all real tokens except BOS and the
+    "\nAction: " cue).
+  - Angles rx, ry, rz (angle_dims 11–13): wrapped into (center-pi, center+pi], center = train circular
+    mean snapped to pi/2 (rx = pi, ry = rz = 0), recorded in splits.json. Fixes i5 episodes 50/66 storing
+    roll as -pi (was normalized to ~-26 and caused 30x loss spikes). Pose = Panda flange xyz [m] in base
+    frame; rx,ry,rz roll-pitch-yaw [rad], R = Rz·Ry·Rx (verified via forward kinematics).
+    data.to_physical_actions() denormalizes (optional output_angle_center=0 for (-pi, pi] robots).
+  - Frame cache: all frames decoded once into 224x224 uint8 .npy memmaps (~57 GB) using exactly the
+    training path (LeRobot pyav decode, uint8 conversion, openpi_client PIL resize_with_pad).
+    Bit-identical to video decoding (test). Without it a batch takes 13–16 s; with it ~4.5 s/step locally.
+  - Stage-A gate: a model is "trusted" only if fixed train AND validation probe losses decrease;
+    Stage B refuses untrusted Stage A. Stage-B variants must share one joint_bc init hash.
+  - result.json / evaluation.json are written last = completion markers; reruns skip finished jobs.
+    Resume checkpoints every hardware.resume_interval steps (newest only), deleted after success.
 
-Specialists probe their own task; Joint BC/MTD use the same pooled i1+i5 probes.
+4. STATUS
+  Verified on the local workstation (1x RTX PRO 6000 Blackwell, local.json):
+    33 tests pass (1 skipped without frame cache); full local smoke (6 trainings + 6 evals, 30 steps)
+    passed before the angle fix; angle fix re-verified on data (spike batches now |x| <= 1.5).
+  NOT yet executed anywhere (only unit tests + --dry-run): DDP training/evaluation, multi-node
+    rendezvous, the SLURM launcher, resume after interruption, benchmark mode, cache build via srun.
+  No current runs exist (all smoke outputs were deleted; the angle fix made them stale anyway).
 
-W&B LINKS
-teacher_i1: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/ifrepl17
-teacher_i5: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/i852gmf2
-joint_bc: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/iojref1f
-output_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/tntedwpx
-output_repr_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/vyfewl0i
-output_repr_temp_mtd: https://forge.coreweave.com/wandb/yus047-/atom-mtd-offlinedata/runs/i7l3cjnm
+5. AWS RUNBOOK (SLURM, 3 nodes x 8 H100, shared filesystem)
+  a) git clone https://github.com/Yuanyuan-Shi/MTD_AtomBench.git && cd MTD_AtomBench
+     bash setup.sh                         # needs git + uv; re-runnable
+     source atom_mtd_offlinedata/env.sh
+     "$ATOM_PYTHON" -m atom_mtd_offlinedata.prepare --config atom_mtd_offlinedata/configs/aws.json
+     git status                            # splits.json / norm_stats.json must be UNCHANGED
+     "$ATOM_PYTHON" -m pytest -q atom_mtd_offlinedata/tests
+  b) Check hardware.frame_cache_dir (/opt/dlami/nvme/atom_frame_cache) exists and is writable on every
+     node (local NVMe, ~57 GB free); edit it in aws.json if not (hardware key: safe to change).
+  c) W&B is online-only and required: Forge gateway https://forge.coreweave.com/api/wandb, project
+     atom-mtd-offlinedata. Provide WANDB_API_KEY (or ~/.netrc entry for api.wandb.ai) to the job.
+  d) "$ATOM_PYTHON" -m atom_mtd_offlinedata.run_experiment --config atom_mtd_offlinedata/configs/aws.json \
+       --phase main --dry-run              # prints plan (Option B) and all srun/torchrun commands
+  e) Recommended test order (submit from repo root):
+     1. 1-node smoke first: copy aws.json OUTSIDE git with hardware.nodes=1 and
+        hardware.output_root=atom_mtd_offlinedata/runs/aws_1node (else step 2 would skip its finished
+        jobs), then CONFIG=/path/copy.json PHASE=smoke sbatch --nodes=1 \
+          atom_mtd_offlinedata/launch/slurm_experiment.sbatch
+        Exercises DDP on 8 GPUs, the cache build and sharded evaluation.
+     2. 3-node smoke: PHASE=smoke sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch
+        (exercises 16-GPU multi-node jobs). Writes runs/aws/smoke_passed.json (required by main).
+     3. Optional: MODE=benchmark sbatch … -> reports/benchmark_aws.json; plan.py then uses measured s/step.
+     4. Main: sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch (est. ~13 h with placeholder
+        timings; Stage A ~9.8 h: T1 then Joint BC on 16 GPUs, T2 on 8; Stage B one variant per node).
+  f) Outputs: runs/aws/<smoke|main>/<variant>_seed7/ (config.json, metrics.jsonl, result.json,
+     evaluation.json, checkpoint/), job logs runs/aws/<phase>/logs/<variant>_<kind>.log, plan.json,
+     comparison.{json,md}; SLURM log atom_mtd_offlinedata/reports/slurm-<name>-<id>.out.
+     Resubmitting the same sbatch skips finished jobs and resumes interrupted ones.
 
-FILES TO READ AFTER RESTART
-1. SESSION_PROGRESS.txt (this file; root-level handoff for next session).
-2. atom_mtd_offlinedata/reports/session_progress.json (exact results, hashes, first-batch losses, evaluation).
-3. atom_mtd_offlinedata/reports/smoke_status.md and training_loss_curves.png / fixed_probe_curves.png.
-4. atom_mtd_offlinedata/README.md (implementation/protocol/reproduction).
-5. atom_mtd_offlinedata/runs/smoke/<variant>_seed7/: config.json, result.json, metrics.jsonl, first_batch.json, wandb.json, checkpoint/.
-6. evaluation.json exists for Joint BC and the three MTD variants; representation_audit.json exists for all MTD runs.
+6. LIKELY FAILURE POINTS TO CHECK FIRST
+  - srun steps: launcher uses `srun --overlap --gpus-per-node=8` and narrows GPUs via ATOM_GPU_IDS ->
+    CUDA_VISIBLE_DEVICES inside the step (launch/__init__.py). Cluster gres/cgroup policy may differ.
+  - Multi-node torchrun rendezvous: c10d on the job's first host, port 29500 + job index; EFA/NCCL env
+    vars may be needed for speed (planner assumes internode_efficiency 0.85).
+  - DDP: find_unused_parameters=True, static_graph for >= 8 GPUs (upstream train_pytorch.py); rank 0
+    runs probes while other ranks wait in NCCL (default timeout should suffice with the frame cache).
+  - Memory: <= 16 observations per GPU (max_train_obs_per_gpu); Stage B holds student + 2 bf16 teachers.
+  - preflight (run by run_experiment) needs CUDA, data, base checkpoint SHA, and a W&B round trip.
+  - If a Stage-A model is untrusted (probes did not decrease) the pipeline stops by design.
 
-LOCAL ENVIRONMENT / PROVENANCE
-Copied OpenPI: openpi/, source commit 215abfb217dbac7d5f1273282331b9b1866c0479; original checkout untouched.
-LoRA SFT implementation: pi05_lora_sft/. Training reuses copied OpenPI train_loop via callbacks.
-Base source: gs://openpi-assets/checkpoints/pi05_base/params
-Converted base: atom_mtd_offlinedata/checkpoints/pi05_base_pytorch/model.safetensors
-Base SHA256: f722b8d13a9c70ee2fe7451568fce1ded46d28d30f0fb7b89b801237514d85b1
-LoRA PaliGemma rank/alpha=16/16; action expert=32/32; dropout=0. Per-head OpenPI factors.
-q/k/v/o and gate/up/down projections; non-LLM modules also trainable per original OpenPI freeze filter.
-Local venv: openpi/.venv. Torch 2.7.1+cu128, torchvision 0.22.1+cu128 for Blackwell GPU.
-Required local Transformers overlay: atom_mtd_offlinedata/runtime/python/transformers.
-W&B API: https://forge.coreweave.com/api/wandb; UI uses /wandb/. Project atom-mtd-offlinedata.
-Existing authentication is read from local netrc into process environment by tracking.py; no API keys stored in handoff.
-Dataset: AtomBench/FrankaPanda revision 4c2d4ed5e86b7967cc048a3bfe935d5daef6c663.
-Exact episode split manifest: atom_mtd_offlinedata/data/FrankaPanda/splits.json. 80/10/10 episodes per i1/i5.
-Default config: configs/single_seed.json (seed list [7]).
-Actual smoke launch used configs/experiment.json (legacy planned list [7,17,27], but smoke executed ONLY seed 7).
-These configs differ only in planned seed repetitions. matches_run_config permits that difference and verifies all actual per-run settings.
-First teacher was already running when probe logging was enhanced: initial/final fixed probes only. Later models also probe at updates 10,20,30.
-No Git repository at workspace root yet; copied openpi contains its own .git. No commit/push performed.
-
-AFTER REBOOT — READ RESULTS WITHOUT RESTARTING TRAINING
-cd '/mnt1/Multi-Teacher Distillation'
-source atom_mtd_offlinedata/env.sh
-cat SESSION_PROGRESS.txt
-"$ATOM_PYTHON" -m atom_mtd_offlinedata.smoke_report
-# Optional correctness recheck:
-"$ATOM_PYTHON" -m pytest -q atom_mtd_offlinedata/tests
-# Optional one-model re-evaluation only (not needed for saved results):
-"$ATOM_PYTHON" -m atom_mtd_offlinedata.evaluate --variant output_repr_temp_mtd --seed 7 --smoke
-Do not rerun run_experiment merely to inspect progress: it skips completed training but repeats evaluations.
-
-FUTURE WORK (after user asks)
-Prepare a clean GitHub source repository and portable AWS environment/data/checkpoint setup.
-Full experiments use single_seed.json: 3 Stage-A jobs x 3000 updates + 3 Stage-B jobs x 1000 = 12000 updates.
-Do not present those main experiments as completed. No three-seed results are available or required.
-
-PERSISTENCE
-Six checkpoint files remain at their original locations (~993 MiB each); converted base and datasets also remain on disk.
-runs/, checkpoints/, data/, runtime/ are gitignored. A future GitHub push alone will NOT transfer checkpoints or datasets.
-A compact source/results archive is in atom_mtd_offlinedata/reports/session_restart_bundle.tar.gz.
-The archive deliberately excludes weights, datasets, virtualenv, runtime overlay, .git, and authentication files.
-This is a local restart save, not a remote backup or preservation of unsaved chat UI state.
+7. WORKING WITH THE USER
+  Propose a plan and wait for approval before non-trivial changes; ask before deleting files, pushing,
+  or launching main runs. Keep values in config, descriptive names, few files. Smoke metrics (30 steps)
+  verify the pipeline only — never present them as method comparisons.
