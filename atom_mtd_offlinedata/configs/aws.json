@@ -98,6 +98,6 @@
       "stage_b": 2.0,
       "eval_model": 300
     },
-    "benchmark_file": "atom_mtd_offlinedata/reports/benchmark_aws.json"
+    "step_time_file": "atom_mtd_offlinedata/reports/step_time_aws.json"
   }
 }

@@ -47,8 +47,8 @@ def run_directory(c, name, seed, smoke=False):
     return output_root(c) / ("smoke" if smoke else "main") / f"{name}_seed{seed}"
 
 
-def benchmark_directory(c, name, world_size):
-    return output_root(c) / "benchmark" / f"{name}_gpus{world_size}"
+def timing_directory(c, name, world_size):
+    return output_root(c) / "step_timing" / f"{name}_gpus{world_size}"
 
 
 def checkpoint_path(c, name, seed, smoke=False):
@@ -117,21 +117,21 @@ def task_probe(model, dataset, c):
     return float(np.mean(values))
 
 
-def train(c, variant, seed, smoke=False, benchmark_steps=None):
-    """Train one variant. benchmark_steps: time that many updates; no W&B or results."""
+def train(c, variant, seed, smoke=False, timing_steps=None):
+    """Train one variant. timing_steps: time that many updates; no W&B or results."""
     if variant not in STAGE_A + STAGE_B:
         raise ValueError("Unsupported variant (there is no Joint BC continuation)")
-    benchmark = benchmark_steps is not None
+    timing = timing_steps is not None
     rank, world_size = distributed_rank()  # from torchrun's environment
     is_main = rank == 0
     directory = (
-        benchmark_directory(c, variant, world_size)
-        if benchmark
+        timing_directory(c, variant, world_size)
+        if timing
         else run_directory(c, variant, seed, smoke)
     )
     if (directory / "result.json").exists():
         raise FileExistsError(f"Completed result already exists: {directory}")
-    if benchmark and is_main and directory.exists():
+    if timing and is_main and directory.exists():
         shutil.rmtree(directory)
     is_b = variant in STAGE_B
     schedule = c["stage_b" if is_b else "stage_a"]
@@ -142,10 +142,10 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
         if is_b
         else {}
     )
-    if benchmark and is_b:
+    if timing and is_b:
         # Timing only: untrained base-plus-LoRA teachers cost the same as trained ones.
         initialization, teachers = None, {"i1": None, "i5": None}
-    if is_b and not benchmark:
+    if is_b and not timing:
         for name in STAGE_A:
             result = json.loads(
                 (run_directory(c, name, seed, smoke) / "result.json").read_text()
@@ -169,8 +169,8 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
     )
     dataset = AtomicPairs(c, "train", task_names)
     validation = AtomicPairs(c, "validation", task_names)
-    if benchmark:
-        steps = benchmark_steps
+    if timing:
+        steps = timing_steps
     elif smoke:
         steps = c["smoke_steps"]
     else:
@@ -178,7 +178,7 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
     # seed * stride + step is unique per (seed, step) only while step < stride.
     assert steps < STEP_SEED_STRIDE, "STEP_SEED_STRIDE must exceed steps"
     hardware = c[HARDWARE_KEY]
-    start_step = 0 if benchmark else latest_resume_step(directory)
+    start_step = 0 if timing else latest_resume_step(directory)
     base_hash = sha256(Path(c["base_checkpoint"]) / "model.safetensors")
     init_hash = (
         sha256(initialization / "trainable.safetensors")
@@ -261,12 +261,12 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
         log_interval=1,
         save_interval=resume_interval,
         resume=bool(start_step),
-        wandb_enabled=not benchmark,
+        wandb_enabled=not timing,
     )
     run_holder, probes, step_times = {}, {}, []
 
     def init_wandb(*args, **kwargs):
-        if benchmark:
+        if timing:
             return
         previous = (
             json.loads((directory / "wandb.json").read_text()) if start_step else {}
@@ -289,7 +289,7 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
         policy = unwrap(model)
         if start_step:
             probes.update(json.loads((directory / "initial_probes.json").read_text()))
-        elif not benchmark:
+        elif not timing:
             if is_main:
                 probes["initial_train"] = task_probe(policy, dataset, c)
                 probes["initial_validation"] = task_probe(policy, validation, c)
@@ -317,7 +317,7 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
                         )
             if is_main:
                 write_json(directory / "initial_probes.json", probes)
-        if is_b and not benchmark:
+        if is_b and not timing:
             assert policy.initialization_sha256 == init_hash
 
     def on_step(model, step, lr, grad_norm):
@@ -339,7 +339,7 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
             "train/grad_norm": grad_norm,
             "optimizer_step": step,
         }
-        if benchmark:
+        if timing:
             return
         if step == 1:
             write_json(
@@ -364,7 +364,7 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
             f.write(json.dumps(metrics) + "\n")
 
     def save(model, optimizer, step, config, is_main, data_config):
-        if not benchmark and step % resume_interval == 0 and step < steps:
+        if not timing and step % resume_interval == 0 and step < steps:
             # Full student + optimizer state for resuming; keep only the newest.
             upstream.save_checkpoint(
                 model, optimizer, step, config, is_main, data_config
@@ -375,10 +375,10 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
                         shutil.rmtree(old)
         if step != steps or not is_main:
             return
-        if benchmark:
+        if timing:
             gaps = np.diff(step_times)[min(5, len(step_times) // 2) :]
             write_json(
-                directory / "benchmark.json",
+                directory / "step_time.json",
                 {
                     "variant": variant,
                     "world_size": world_size,
@@ -440,8 +440,8 @@ def train(c, variant, seed, smoke=False, benchmark_steps=None):
     )
     if not is_main:
         return None
-    if benchmark:
-        return json.loads((directory / "benchmark.json").read_text())
+    if timing:
+        return json.loads((directory / "step_time.json").read_text())
     tracking.verify_history(c, run_holder["path"], "train/loss_total")
     result = json.loads((directory / "training_result.json").read_text())
     result.update(wandb_url=run_holder["url"], wandb_verified=True)
@@ -458,7 +458,7 @@ if __name__ == "__main__":
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--smoke", action="store_true")
     p.add_argument(
-        "--benchmark-steps", type=int, help="time updates only (benchmark.py)"
+        "--timing-steps", type=int, help="time updates only (launch/measure_speed.py)"
     )
     args = p.parse_args()
     train(
@@ -466,5 +466,5 @@ if __name__ == "__main__":
         args.variant,
         args.seed,
         args.smoke,
-        benchmark_steps=args.benchmark_steps,
+        timing_steps=args.timing_steps,
     )

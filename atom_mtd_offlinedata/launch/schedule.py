@@ -4,11 +4,11 @@ Phases run in order (Stage A, Stage B, evaluation) because each needs the previo
 phase's checkpoints. Within a phase, every combination of job order and GPU count
 is simulated and the shortest schedule is kept. GPU counts are those that split
 the global batch evenly and either fit inside one node or use whole nodes.
-Seconds per step come from benchmark.py when measured, else from the estimates
+Seconds per step come from launch/measure_speed.py when measured, else from the estimates
 in hardware.step_seconds (scaled by GPU count, with an efficiency loss for
 multi-node jobs).
 
-    python -m atom_mtd_offlinedata.plan --config atom_mtd_offlinedata/configs/aws.json
+    python -m atom_mtd_offlinedata.launch.schedule --config atom_mtd_offlinedata/configs/aws.json
 """
 
 import argparse
@@ -18,8 +18,8 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .common import DEFAULT_CONFIG, HARDWARE_KEY, read_config, stage_a_steps
-from .model import STAGE_A, STAGE_B
+from ..common import DEFAULT_CONFIG, HARDWARE_KEY, read_config, stage_a_steps
+from ..model import STAGE_A, STAGE_B
 
 EVALUATED = STAGE_A + STAGE_B
 BRUTE_FORCE_LIMIT = (
@@ -104,16 +104,17 @@ def gpu_options(c, kind="train"):
     return options
 
 
-def load_benchmarks(c):
-    path = c[HARDWARE_KEY].get("benchmark_file")
+def load_step_times(c):
+    """Measured seconds per step (launch/measure_speed.py), if available."""
+    path = c[HARDWARE_KEY].get("step_time_file")
     if not path or not Path(path).exists():
         return {}
     return json.loads(Path(path).read_text())
 
 
-def seconds_per_step(c, cost_key, gpus, benchmarks):
+def seconds_per_step(c, cost_key, gpus, step_times):
     hw = c[HARDWARE_KEY]
-    measured = benchmarks.get(cost_key, {})
+    measured = step_times.get(cost_key, {})
     if str(gpus) in measured:
         return measured[str(gpus)]
     if measured:  # extrapolate from the nearest measured GPU count
@@ -129,14 +130,14 @@ def seconds_per_step(c, cost_key, gpus, benchmarks):
     return seconds
 
 
-def simulate(c, jobs, counts, benchmarks):
+def simulate(c, jobs, counts, step_times):
     """List-schedule jobs (in order) with the given GPU counts; returns makespan."""
     hw = c[HARDWARE_KEY]
     per_node = hw["gpus_per_node"]
     free_at = [[0.0] * per_node for _ in range(hw["nodes"])]
     placed = []
     for job, gpus in zip(jobs, counts):
-        duration = job.steps * seconds_per_step(c, job.cost_key, gpus, benchmarks)
+        duration = job.steps * seconds_per_step(c, job.cost_key, gpus, step_times)
         if gpus >= per_node:  # whole nodes, the earliest-free ones
             k = gpus // per_node
             ready = sorted(range(len(free_at)), key=lambda n: max(free_at[n]))[:k]
@@ -169,14 +170,14 @@ def simulate(c, jobs, counts, benchmarks):
     return max(j.end_s for j in placed), placed
 
 
-def schedule_phase(c, jobs, benchmarks):
+def schedule_phase(c, jobs, step_times):
     options = gpu_options(c, jobs[0].kind)
     combos = math.factorial(len(jobs)) * len(options) ** len(jobs)
     best = None
     if combos <= BRUTE_FORCE_LIMIT:
         for order in itertools.permutations(jobs):
             for counts in itertools.product(options, repeat=len(jobs)):
-                makespan, placed = simulate(c, order, counts, benchmarks)
+                makespan, placed = simulate(c, order, counts, step_times)
                 if best is None or makespan < best[0] - 1e-9:
                     best = (makespan, placed)
     else:  # greedy: equal GPU share per job, longest job first
@@ -184,17 +185,17 @@ def schedule_phase(c, jobs, benchmarks):
         share = max(g for g in options if g <= max(1, total // len(jobs)))
         order = sorted(
             jobs,
-            key=lambda j: -j.steps * seconds_per_step(c, j.cost_key, share, benchmarks),
+            key=lambda j: -j.steps * seconds_per_step(c, j.cost_key, share, step_times),
         )
-        best = simulate(c, order, [share] * len(order), benchmarks)
+        best = simulate(c, order, [share] * len(order), step_times)
     return best
 
 
-def make_plan(c, smoke=False):
-    benchmarks = load_benchmarks(c)
+def make_schedule(c, smoke=False):
+    step_times = load_step_times(c)
     phases, total = [], 0.0
     for name, jobs in phase_jobs(c, smoke):
-        makespan, placed = schedule_phase(c, jobs, benchmarks)
+        makespan, placed = schedule_phase(c, jobs, step_times)
         phases.append(
             {"name": name, "makespan_s": makespan, "jobs": [asdict(j) for j in placed]}
         )
@@ -204,20 +205,20 @@ def make_plan(c, smoke=False):
         "nodes": hw["nodes"],
         "gpus_per_node": hw["gpus_per_node"],
         "smoke": smoke,
-        "timing_source": "benchmark"
-        if benchmarks
+        "timing_source": "measured (launch/measure_speed.py)"
+        if step_times
         else "hardware.step_seconds estimates",
         "phases": phases,
         "total_s": total,
     }
 
 
-def describe(plan):
+def describe_schedule(schedule):
     lines = [
-        f"{plan['nodes']} node(s) x {plan['gpus_per_node']} GPU(s); timing from "
-        f"{plan['timing_source']}; estimated total {plan['total_s'] / 3600:.1f} h"
+        f"{schedule['nodes']} node(s) x {schedule['gpus_per_node']} GPU(s); timing from "
+        f"{schedule['timing_source']}; estimated total {schedule['total_s'] / 3600:.1f} h"
     ]
-    for phase in plan["phases"]:
+    for phase in schedule["phases"]:
         lines.append(f"\n{phase['name']}: ~{phase['makespan_s'] / 3600:.2f} h")
         for j in sorted(phase["jobs"], key=lambda j: (j["start_s"], j["nodes"])):
             lines.append(
@@ -233,4 +234,4 @@ if __name__ == "__main__":
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--smoke", action="store_true")
     args = p.parse_args()
-    print(describe(make_plan(read_config(args.config), args.smoke)))
+    print(describe_schedule(make_schedule(read_config(args.config), args.smoke)))

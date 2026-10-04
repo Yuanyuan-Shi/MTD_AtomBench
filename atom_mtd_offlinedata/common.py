@@ -26,7 +26,7 @@ def read_config(path=DEFAULT_CONFIG):
         if c.get(key) and not Path(c[key]).is_absolute():
             c[key] = str(ROOT / c[key])
     hardware = c[HARDWARE_KEY]
-    for key in ("output_root", "frame_cache_dir", "benchmark_file"):
+    for key in ("output_root", "frame_cache_dir", "step_time_file"):
         if hardware.get(key) and not Path(hardware[key]).is_absolute():
             hardware[key] = str(ROOT / hardware[key])
     return c

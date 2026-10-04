@@ -42,24 +42,24 @@ def test_stage_a_steps_follow_epochs_over_pairs():
     assert stage_a_steps(c, 36188) == math.ceil(10 * 36188 / 32)
 
 
-def test_plan_reproduces_option_b_on_three_nodes():
-    from atom_mtd_offlinedata.plan import make_plan
+def test_schedule_reproduces_option_b_on_three_nodes():
+    from atom_mtd_offlinedata.launch.schedule import make_schedule
 
     c = read_config(CONFIGS / "aws.json")
-    c[HARDWARE_KEY]["benchmark_file"] = None  # use the documented estimates
-    phases = {p["name"]: p for p in make_plan(c)["phases"]}
+    c[HARDWARE_KEY]["step_time_file"] = None  # use the documented estimates
+    phases = {p["name"]: p for p in make_schedule(c)["phases"]}
     gpus = {j["variant"]: j["gpus"] for j in phases["stage_a"]["jobs"]}
     assert gpus == {"joint_bc": 16, "teacher_i1": 16, "teacher_i5": 8}
     assert {j["gpus"] for j in phases["stage_b"]["jobs"]} == {8}
     assert len({tuple(j["nodes"]) for j in phases["stage_b"]["jobs"]}) == 3
 
 
-def test_plan_runs_sequentially_on_one_gpu():
-    from atom_mtd_offlinedata.plan import make_plan
+def test_schedule_runs_sequentially_on_one_gpu():
+    from atom_mtd_offlinedata.launch.schedule import make_schedule
 
     c = read_config(CONFIGS / "local.json")
-    c[HARDWARE_KEY]["benchmark_file"] = None
-    for phase in make_plan(c, smoke=True)["phases"]:
+    c[HARDWARE_KEY]["step_time_file"] = None
+    for phase in make_schedule(c, smoke=True)["phases"]:
         jobs = sorted(phase["jobs"], key=lambda j: j["start_s"])
         assert all(j["gpus"] == 1 for j in jobs)
         assert all(
@@ -132,7 +132,7 @@ def test_evaluation_randomness_does_not_depend_on_batching():
 
 
 def test_slurm_commands_place_jobs_on_planned_nodes_and_gpus(monkeypatch):
-    from atom_mtd_offlinedata.launch import SlurmLauncher
+    from atom_mtd_offlinedata.launch.slurm import SlurmLauncher
 
     monkeypatch.delenv("SLURM_JOB_NODELIST", raising=False)
     launcher = SlurmLauncher(read_config(CONFIGS / "aws.json"), dry_run=True)

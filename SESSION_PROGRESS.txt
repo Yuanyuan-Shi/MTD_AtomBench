@@ -24,16 +24,17 @@ Scale on AWS: batch 64 observations (32 pairs), Stage A 10 epochs over valid pai
     prepare.py   base model (HF yyshi0619/pi05-base-pytorch @3e7adade, sha256 f722b8d1…) + dataset,
                  splits, angle windows, norm stats      data.py      pairs, transforms, PairLoader
     model.py / losses.py      DistillationPolicy (compare = matched student/teacher forward), KD losses
-    train.py     hooks into openpi train_loop (no own optimizer loop); DDP-aware; resume; benchmark mode
-    evaluate.py  test metrics, sharded over ranks     run_experiment.py  plan -> launch phases -> checks
-    plan.py      GPU allocation search     launch/   local + SLURM launchers, slurm_experiment.sbatch
-    cache_frames.py  frame cache     benchmark.py  s/step measurement     preflight.py  environment gate
+    train.py     hooks into openpi train_loop (no own optimizer loop); DDP-aware; resume; timing mode
+    evaluate.py  test metrics, sharded over ranks     run_experiment.py  schedule -> launch phases -> checks
+    launch/      schedule.py (job -> nodes/GPUs search), measure_speed.py (s/step per GPU count),
+                 local.py / slurm.py (launchers), slurm_experiment.sbatch (SLURM entry)
+    cache_frames.py  frame cache     preflight.py  environment gate
 Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPanda/<task dirs>,
   data/frame_cache/, openpi/.venv, openpi/third_party.
 
 3. CORE DESIGN RULES
   - Config = experiment + "hardware". hardware (launcher, nodes, gpus_per_node, output_root,
-    frame_cache_dir, workers, max_train_obs_per_gpu, resume_interval, step_seconds, benchmark_file)
+    frame_cache_dir, workers, max_train_obs_per_gpu, resume_interval, step_seconds, step_time_file)
     is excluded from config_hash / matches_run_config: moving hardware never invalidates runs.
     Changing any experiment key does (finished runs then raise "stale"). tests/test_scaleup.py
     enforces local.json vs aws.json differ only in hardware + batch_size.
@@ -68,7 +69,7 @@ Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPand
     33 tests pass (1 skipped without frame cache); full local smoke (6 trainings + 6 evals, 30 steps)
     passed before the angle fix; angle fix re-verified on data (spike batches now |x| <= 1.5).
   NOT yet executed anywhere (only unit tests + --dry-run): DDP training/evaluation, multi-node
-    rendezvous, the SLURM launcher, resume after interruption, benchmark mode, cache build via srun.
+    rendezvous, the SLURM launcher, resume after interruption, timing mode, cache build via srun.
   No current runs exist (all smoke outputs were deleted; the angle fix made them stale anyway).
 
 5. AWS RUNBOOK (SLURM, 3 nodes x 8 H100, shared filesystem)
@@ -83,7 +84,7 @@ Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPand
   c) W&B is online-only and required: Forge gateway https://forge.coreweave.com/api/wandb, project
      atom-mtd-offlinedata. Provide WANDB_API_KEY (or ~/.netrc entry for api.wandb.ai) to the job.
   d) "$ATOM_PYTHON" -m atom_mtd_offlinedata.run_experiment --config atom_mtd_offlinedata/configs/aws.json \
-       --phase main --dry-run              # prints plan (Option B) and all srun/torchrun commands
+       --phase main --dry-run              # prints schedule (Option B) and all srun/torchrun commands
   e) Recommended test order (submit from repo root):
      1. 1-node smoke first: copy aws.json OUTSIDE git with hardware.nodes=1 and
         hardware.output_root=atom_mtd_offlinedata/runs/aws_1node (else step 2 would skip its finished
@@ -92,17 +93,17 @@ Not in git (recreated): checkpoints/, runs/, reports/, runtime/, data/FrankaPand
         Exercises DDP on 8 GPUs, the cache build and sharded evaluation.
      2. 3-node smoke: PHASE=smoke sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch
         (exercises 16-GPU multi-node jobs). Writes runs/aws/smoke_passed.json (required by main).
-     3. Optional: MODE=benchmark sbatch … -> reports/benchmark_aws.json; plan.py then uses measured s/step.
+     3. Optional: MODE=measure_speed sbatch … -> reports/step_time_aws.json; schedule.py then uses it.
      4. Main: sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch (est. ~13 h with placeholder
         timings; Stage A ~9.8 h: T1 then Joint BC on 16 GPUs, T2 on 8; Stage B one variant per node).
   f) Outputs: runs/aws/<smoke|main>/<variant>_seed7/ (config.json, metrics.jsonl, result.json,
-     evaluation.json, checkpoint/), job logs runs/aws/<phase>/logs/<variant>_<kind>.log, plan.json,
+     evaluation.json, checkpoint/), job logs runs/aws/<phase>/logs/<variant>_<kind>.log, schedule.json,
      comparison.{json,md}; SLURM log atom_mtd_offlinedata/reports/slurm-<name>-<id>.out.
      Resubmitting the same sbatch skips finished jobs and resumes interrupted ones.
 
 6. LIKELY FAILURE POINTS TO CHECK FIRST
   - srun steps: launcher uses `srun --overlap --gpus-per-node=8` and narrows GPUs via ATOM_GPU_IDS ->
-    CUDA_VISIBLE_DEVICES inside the step (launch/__init__.py). Cluster gres/cgroup policy may differ.
+    CUDA_VISIBLE_DEVICES inside the step (launch/slurm.py). Cluster gres/cgroup policy may differ.
   - Multi-node torchrun rendezvous: c10d on the job's first host, port 29500 + job index; EFA/NCCL env
     vars may be needed for speed (planner assumes internode_efficiency 0.85).
   - DDP: find_unused_parameters=True, static_graph for >= 8 GPUs (upstream train_pytorch.py); rank 0

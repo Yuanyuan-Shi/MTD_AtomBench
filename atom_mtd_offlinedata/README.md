@@ -31,8 +31,9 @@ The implementation is not a claim that the requested training runs have complete
 - `train.py`: configuration and callbacks into OpenPI's existing training loop.
 - `evaluate.py`: held-out flow/action/teacher/temporal errors and single-seed tables.
 - `run_experiment.py`: orchestration of a whole phase, with no continuation baseline.
-- `plan.py`, `benchmark.py`, `launch/`: GPU allocation, step timing, and local or
-  SLURM job launch (`launch/slurm_experiment.sbatch`).
+- `launch/`: running on hardware. `schedule.py` (which job runs on which nodes/GPUs,
+  in what order), `measure_speed.py` (seconds per training step per GPU count),
+  `local.py` / `slurm.py` (launchers), `slurm_experiment.sbatch` (SLURM entry).
 - `preflight.py`, `diagnose.py`, `tests/`: environment, real-data gradient and protocol checks.
 
 Only the OpenPI trainer and `PI0Pytorch` have experiment-specific edits. `env.sh`
@@ -254,11 +255,11 @@ Video decoding dominated step time (13–16 s per batch of 32 observations).
 read through `np.memmap`. A test checks that cached records are bit-identical to
 video decoding. With `frame_cache_dir: null`, frames are decoded from video as before.
 
-`plan.py` assigns jobs to nodes and GPUs: phases run in order, and within a phase every
+`launch/schedule.py` assigns jobs to nodes and GPUs: phases run in order, and within a phase every
 job order and GPU count (counts that split the batch, fit one node or use whole nodes,
 and respect `max_train_obs_per_gpu`) is simulated; the shortest schedule wins. On
 3 × 8 GPUs it runs T1 then Joint BC on 16 GPUs while T2 uses the third node, one KD
-variant per node, and evaluation on 4 GPUs per model. `benchmark.py` measures seconds
+variant per node, and evaluation on 4 GPUs per model. `launch/measure_speed.py` measures seconds
 per step; the planner uses those numbers instead of the estimates once they exist.
 
 ## Reproduction
@@ -301,7 +302,7 @@ bash setup.sh                       # third_party, openpi/.venv, patched transfo
 source atom_mtd_offlinedata/env.sh
 "$ATOM_PYTHON" -m atom_mtd_offlinedata.prepare --config atom_mtd_offlinedata/configs/aws.json
 git status                          # splits.json / norm_stats.json must be unchanged
-MODE=benchmark sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch   # optional timing
+MODE=measure_speed sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch   # optional timing
 PHASE=smoke sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch      # smoke gate
 sbatch atom_mtd_offlinedata/launch/slurm_experiment.sbatch                  # full run
 ```

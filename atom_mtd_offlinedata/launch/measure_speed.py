@@ -1,8 +1,8 @@
-"""Measure seconds per training step at each usable GPU count, for plan.py.
+"""Measure seconds per training step at each usable GPU count, for launch/schedule.py.
 
 Times a few dozen updates of a Stage-A and a Stage-B variant (Stage B with
 untrained teachers, which cost the same) through the normal training path, with
-no W&B or results. Writes hardware.benchmark_file, which plan.py then prefers
+no W&B or results. Writes hardware.step_time_file, which schedule.py then prefers
 over the hardware.step_seconds estimates. Run inside the same allocation the
 experiment will use (e.g. the sbatch job on AWS).
 """
@@ -10,10 +10,10 @@ experiment will use (e.g. the sbatch job on AWS).
 import argparse
 import json
 
-from .common import DEFAULT_CONFIG, HARDWARE_KEY, write_json, read_config
-from .launch import make_launcher
-from .plan import gpu_options
-from .train import benchmark_directory
+from ..common import DEFAULT_CONFIG, HARDWARE_KEY, write_json, read_config
+from . import make_launcher
+from .schedule import gpu_options
+from ..train import timing_directory
 
 PROBES = {"stage_a": "joint_bc", "stage_b": "output_repr_temp_mtd"}
 
@@ -32,14 +32,14 @@ def run(c, config_path, steps, dry_run=False):
     for cost_key, variant in PROBES.items():
         results[cost_key] = {}
         options = gpu_options(c, "train")
-        # Whole-node counts are what the plan uses for training; others extrapolate.
+        # Whole-node counts are what the schedule uses for training; others extrapolate.
         for gpus in [
             g for g in options if g >= c[HARDWARE_KEY]["gpus_per_node"]
         ] or options[-1:]:
             nodes, gpu_ids = placement(c, gpus)
             job = {
                 "variant": variant,
-                "kind": f"benchmark{gpus}",
+                "kind": f"timing{gpus}",
                 "gpus": gpus,
                 "nodes": nodes,
                 "gpu_ids": gpu_ids,
@@ -53,18 +53,18 @@ def run(c, config_path, steps, dry_run=False):
                 variant,
                 "--seed",
                 str(seed),
-                "--benchmark-steps",
+                "--timing-steps",
                 str(steps),
             ]
             launcher.run_jobs(
                 [job],
                 lambda _: args,
-                benchmark_directory(c, variant, gpus).parent / "logs",
+                timing_directory(c, variant, gpus).parent / "logs",
             )
             if dry_run:
                 continue
             measured = json.loads(
-                (benchmark_directory(c, variant, gpus) / "benchmark.json").read_text()
+                (timing_directory(c, variant, gpus) / "step_time.json").read_text()
             )
             results[cost_key][str(gpus)] = measured["seconds_per_step"]
             print(
@@ -73,7 +73,7 @@ def run(c, config_path, steps, dry_run=False):
             )
     if not dry_run:
         write_json(
-            c[HARDWARE_KEY]["benchmark_file"],
+            c[HARDWARE_KEY]["step_time_file"],
             {**results, "steps": steps, "batch_size": c["batch_size"]},
         )
     return results

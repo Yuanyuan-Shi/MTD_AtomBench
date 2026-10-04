@@ -1,8 +1,14 @@
-"""How planned jobs start: local processes, or SLURM job steps inside one allocation.
+"""Running the experiment's jobs on hardware.
 
-Both backends run a phase's jobs in plan order: a job starts as soon as every
+launch/__init__.py  shared Launcher base class and make_launcher (picks by hardware.launcher)
+launch/local.py     LocalLauncher: plain processes on this machine
+launch/slurm.py     SlurmLauncher: srun job steps inside one SLURM allocation
+launch/schedule.py  which job runs on which nodes/GPUs, in what order (fastest schedule)
+launch/measure_speed.py  seconds per training step per GPU count, used by schedule.py
+
+Launchers run a phase's jobs in schedule order: a job starts as soon as every
 earlier job that shares one of its GPUs has finished, which reproduces the
-schedule simulated by plan.py. Multi-GPU jobs run under torchrun.
+schedule simulated by schedule.py. Multi-GPU jobs run under torchrun.
 """
 
 import os
@@ -61,7 +67,7 @@ class Launcher:
             subprocess.run(command, check=True, cwd=ROOT)
 
     def run_jobs(self, jobs, args_for, log_dir):
-        """Run jobs (dicts from plan.py) in plan order; raise if any job fails."""
+        """Run jobs (dicts from schedule.py) in schedule order; raise if any job fails."""
         order = sorted(jobs, key=lambda j: (j["start_s"], j["nodes"], j["gpu_ids"]))
         slots = [{(n, g) for n in j["nodes"] for g in j["gpu_ids"]} for j in order]
         commands = [self.command(j, i, args_for(j)) for i, j in enumerate(order)]
@@ -122,84 +128,14 @@ class Launcher:
                 handle.close()
 
 
-class LocalLauncher(Launcher):
-    """One machine; GPUs selected with CUDA_VISIBLE_DEVICES."""
-
-    def command(self, job, index, module_args):
-        env = {"CUDA_VISIBLE_DEVICES": ",".join(map(str, job["gpu_ids"]))}
-        return self._torchrun(job, index, module_args), env
-
-    def every_node_command(self, argv):
-        return [sys.executable, "-m", *argv]
-
-
-class SlurmLauncher(Launcher):
-    """Job steps (srun --overlap) inside one sbatch allocation of hardware.nodes nodes."""
-
-    def __init__(self, c, dry_run=False):
-        super().__init__(c, dry_run)
-        nodes = c[HARDWARE_KEY]["nodes"]
-        if dry_run and "SLURM_JOB_NODELIST" not in os.environ:
-            self.hosts = [f"node{i}" for i in range(nodes)]
-        else:
-            listing = subprocess.run(
-                ["scontrol", "show", "hostnames", os.environ["SLURM_JOB_NODELIST"]],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.hosts = listing.stdout.split()
-        if len(self.hosts) != nodes:
-            raise RuntimeError(
-                f"Allocation has {len(self.hosts)} nodes but hardware.nodes is {nodes}"
-            )
-
-    def command(self, job, index, module_args):
-        hosts = [self.hosts[n] for n in job["nodes"]]
-        visible = ",".join(map(str, job["gpu_ids"]))
-        srun = [
-            "srun",
-            "--overlap",
-            "--kill-on-bad-exit=1",
-            f"--nodes={len(hosts)}",
-            f"--ntasks={len(hosts)}",
-            "--ntasks-per-node=1",
-            f"--gpus-per-node={self.per_node}",
-            f"--nodelist={','.join(hosts)}",
-            f"--export=ALL,ATOM_GPU_IDS={visible}",
-        ]
-        # SLURM sets CUDA_VISIBLE_DEVICES for the step; narrow it to this job's GPUs.
-        select = [
-            "bash",
-            "-c",
-            'export CUDA_VISIBLE_DEVICES="$ATOM_GPU_IDS"; exec "$@"',
-            "_",
-        ]
-        argv = (
-            srun
-            + select
-            + self._torchrun(job, index, module_args, rendezvous_host=hosts[0])
-        )
-        return argv, {"CUDA_VISIBLE_DEVICES": visible}
-
-    def every_node_command(self, argv):
-        n = len(self.hosts)
-        return [
-            "srun",
-            "--overlap",
-            f"--nodes={n}",
-            f"--ntasks={n}",
-            "--ntasks-per-node=1",
-            sys.executable,
-            "-m",
-            *argv,
-        ]
-
-
 def make_launcher(c, dry_run=False):
     kind = c[HARDWARE_KEY]["launcher"]
     if kind == "local":
+        from .local import LocalLauncher
+
         return LocalLauncher(c, dry_run)
     if kind == "slurm":
+        from .slurm import SlurmLauncher
+
         return SlurmLauncher(c, dry_run)
     raise ValueError(f"Unknown hardware.launcher {kind!r}")

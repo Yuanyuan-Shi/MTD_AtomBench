@@ -1,6 +1,6 @@
 """Stage orchestration only. Every training job uses OpenPI's train_loop.
 
-Plans the run for the configured hardware (plan.py), builds the frame cache on
+Schedules the run for the configured hardware (launch/schedule.py), builds the frame cache on
 every node, then runs Stage A, Stage B and evaluation through the configured
 launcher (local processes or SLURM job steps). Finished jobs are skipped, so a
 rerun continues where a previous one stopped.
@@ -26,7 +26,7 @@ from .common import (
 )
 from .launch import make_launcher
 from .model import STAGE_A, STAGE_B
-from .plan import describe, make_plan
+from .launch.schedule import describe_schedule, make_schedule
 from .train import run_directory
 
 
@@ -90,7 +90,7 @@ def main():
     p.add_argument("--config", default=DEFAULT_CONFIG)
     p.add_argument("--phase", choices=("smoke", "main"), required=True)
     p.add_argument(
-        "--dry-run", action="store_true", help="print the plan and commands only"
+        "--dry-run", action="store_true", help="print the schedule and commands only"
     )
     args = p.parse_args()
     c = read_config(args.config)
@@ -98,8 +98,8 @@ def main():
     if not smoke and len(c["training_seeds"]) != 1:
         raise ValueError("The current protocol trains one matched seed")
     launcher = make_launcher(c, args.dry_run)
-    plan = make_plan(c, smoke)
-    print(describe(plan), flush=True)
+    schedule = make_schedule(c, smoke)
+    print(describe_schedule(schedule), flush=True)
     phase_root = output_root(c) / args.phase
     if c[HARDWARE_KEY].get("frame_cache_dir"):
         # Before preflight, which checks the cache; skipped where already complete.
@@ -107,7 +107,7 @@ def main():
             ["atom_mtd_offlinedata.cache_frames", "--config", str(args.config)]
         )
     if not args.dry_run:
-        write_json(phase_root / "plan.json", plan)
+        write_json(phase_root / "schedule.json", schedule)
         subprocess.run(
             [
                 sys.executable,
@@ -123,7 +123,7 @@ def main():
         if not smoke:
             check_smoke_gate(c)
     for seed in c["training_seeds"][:1] if smoke else c["training_seeds"]:
-        for phase in plan["phases"]:
+        for phase in schedule["phases"]:
             jobs = [
                 j
                 for j in phase["jobs"]

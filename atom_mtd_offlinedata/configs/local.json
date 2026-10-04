@@ -98,6 +98,6 @@
       "stage_b": 8.0,
       "eval_model": 600
     },
-    "benchmark_file": "atom_mtd_offlinedata/reports/benchmark_local.json"
+    "step_time_file": "atom_mtd_offlinedata/reports/step_time_local.json"
   }
 }
